@@ -39,20 +39,51 @@ export type Platform =
   | "manual"
   | string; // forward-compatible with future platforms
 
-/** All possible reservation lifecycle statuses */
-export type ReservationStatus =
-  | "inquiry"
+/** All possible reservation status categories */
+export type ReservationStatusCategory =
   | "request"
-  | "pending verification"
-  | "request for payment"
-  | "checkpoint"
   | "accepted"
   | "cancelled"
+  | "not accepted"
+  | "checkpoint"
+  | "unknown";
+
+/** Sub-category within a status category (platform-specific granularity) */
+export type ReservationStatusSubCategory =
+  | "pending verification"
+  | "awaiting approval"
+  | "request to book"
+  | "request for payment"
   | "declined"
   | "withdrawn"
-  | "expired";
+  | "expired"
+  | "checkpoint"
+  | "voided"
+  | string; // platform may return additional values
 
-/** Per-day calendar status */
+/** Calendar day availability reason */
+export type AvailabilityReason = "AVAILABLE" | "RESERVED" | "BLOCKED";
+
+/** What caused the calendar day to be unavailable/blocked */
+export type AvailabilitySourceType =
+  | "USER" // Manually blocked by the host
+  | "VENDOR" // Blocked by a 3rd party
+  | "PLATFORM" // Blocked by the booking platform
+  | "AVAILABILITY_WINDOW" // Outside the booking window
+  | "TURNOVER_DAY" // Maintenance/turnover between stays
+  | "ADVANCED_NOTICE" // Advance notice restriction
+  | "UPSELL" // Held for upsell
+  | "RESERVATION"; // Has an active reservation
+
+/** Message source (how the message was sent) */
+export type MessageSource =
+  | "public_api"
+  | "platform"
+  | "automated"
+  | "hospitable"
+  | "AI";
+
+/** Per-day calendar status string (used in update payloads) */
 export type CalendarDayStatus = "available" | "unavailable" | "booked";
 
 // ─── Address & Location ───────────────────────────────────────────────────────
@@ -63,12 +94,16 @@ export interface Coordinates {
 }
 
 export interface Address {
-  line1: string;
+  number?: string;
+  street?: string;
+  line1?: string;
   line2: string | null;
   city: string;
   state: string | null;
   zip: string | null;
+  postcode?: string | null;
   country: string; // ISO 3166-1 alpha-2
+  display?: string; // Human-readable full address
   coordinates: Coordinates | null;
 }
 
@@ -81,14 +116,32 @@ export interface Capacity {
   bathrooms: number;
 }
 
+export interface RoomDetail {
+  type: string; // e.g. "bedroom", "bathroom"
+  quantity: number;
+}
+
+export interface HouseRules {
+  pets_allowed: boolean;
+  smoking_allowed: boolean;
+  events_allowed: boolean | null;
+}
+
+export interface ParentChild {
+  type: "parent" | "child";
+  parent: string | null; // UUID of parent property
+  children: string[] | null;
+  siblings: string[] | null;
+}
+
 // ─── Guest Counts (per reservation) ──────────────────────────────────────────
 
 export interface GuestCounts {
   total: number;
-  adults: number;
-  children: number;
-  infants: number;
-  pets: number;
+  adult_count: number;
+  child_count: number;
+  infant_count: number;
+  pet_count: number;
 }
 
 // ─── Property Image ───────────────────────────────────────────────────────────
@@ -106,19 +159,31 @@ export interface Property {
   id: string; // UUID
   name: string;
   public_name: string | null;
+  picture: string | null; // Cover image URL
   type: string; // e.g. "entire_home", "private_room"
+  property_type: string;
   room_type: string;
   timezone: string; // IANA tz, e.g. "America/New_York"
   listed: boolean;
+  calendar_restricted: boolean; // If true, calendar CANNOT be updated via API
   address: Address;
   amenities: string[];
   capacity: Capacity;
-  house_rules: string | null;
+  room_details: RoomDetail[];
+  house_rules: HouseRules;
+  description: string | null;
+  summary: string | null;
+  check_in: string | null; // Default check-in time, e.g. "15:00"
+  check_out: string | null;
+  currency: string; // ISO 4217
+  tags: string[];
+  parent_child: ParentChild | null;
   created_at: string; // ISO 8601
   updated_at: string; // ISO 8601
   // Included relations (only present when ?include=... is used)
   listings?: Listing[];
   images?: PropertyImage[];
+  ical_imports?: ICalImport[];
   user?: User;
 }
 
@@ -239,7 +304,22 @@ export interface ReservationFinancials {
   currency: string; // ISO 4217, e.g. "USD"
 }
 
-// ─── Quote ────────────────────────────────────────────────────────────────────
+/** Status of a reservation — represented as a category object, not a plain string */
+export interface ReservationStatus {
+  category: ReservationStatusCategory;
+  sub_category: ReservationStatusSubCategory;
+}
+
+export interface ReservationStatusHistoryEntry extends ReservationStatus {
+  changed_at: string; // ISO 8601 — when this status was set
+}
+
+export interface ReservationStatusHistory {
+  current: ReservationStatus;
+  history: ReservationStatusHistoryEntry[];
+}
+
+// ─── Quote ───────────────────────────────────────────────────────────────────
 
 export interface Quote {
   check_in: string; // YYYY-MM-DD
@@ -256,15 +336,20 @@ export interface Quote {
 
 export interface Reservation {
   id: string; // UUID
-  status: ReservationStatus;
-  channel: Platform;
-  check_in: string; // YYYY-MM-DD
-  check_out: string; // YYYY-MM-DD
+  conversation_id: string;
+  platform: Platform;
+  platform_id: string; // Reservation code on the originating platform
+  booking_date: string; // ISO 8601
+  arrival_date: string; // YYYY-MM-DD
+  departure_date: string; // YYYY-MM-DD
   nights: number;
-  guests_count: number;
-  guest_counts?: GuestCounts;
-  total_price: number;
-  currency: string; // ISO 4217
+  check_in: string; // Exact check-in datetime ISO 8601
+  check_out: string; // Exact check-out datetime ISO 8601
+  last_message_at: string;
+  reservation_status: ReservationStatusHistory;
+  guests: GuestCounts;
+  stay_type: string | null;
+  issue_alert: string | null;
   created_at: string;
   updated_at: string;
   // Included relations (only present when ?include=... is used)
@@ -338,22 +423,39 @@ export interface Checkin {
 
 // ─── Calendar ─────────────────────────────────────────────────────────────────
 
-export interface CalendarDay {
-  date: string; // YYYY-MM-DD
-  status: CalendarDayStatus;
-  price: number | null;
-  min_stay: number | null;
-  check_in_allowed: boolean;
-  check_out_allowed: boolean;
+/** Calendar day availability status object (nested inside CalendarDay) */
+export interface AvailabilityStatus {
+  reason: AvailabilityReason; // "AVAILABLE" | "RESERVED" | "BLOCKED"
+  source_type: AvailabilitySourceType | null;
+  source: string | null; // Name of the source (e.g. "Airbnb")
+  available: boolean;
 }
 
+/** Price object as returned by the API (amount in base currency units) */
+export interface CalendarPrice {
+  amount: number; // e.g. 15000 = $150.00
+  currency: string; // ISO 4217
+  formatted: string; // e.g. "$150.00"
+}
+
+export interface CalendarDay {
+  date: string; // YYYY-MM-DD
+  day: string; // e.g. "FRIDAY"
+  min_stay: number;
+  status: AvailabilityStatus; // Use status.reason to check availability
+  price: CalendarPrice;
+  closed_for_checkin: boolean;
+  closed_for_checkout: boolean;
+}
+
+/** Used in PATCH /calendar update payloads */
 export interface CalendarUpdateItem {
   date: string; // YYYY-MM-DD
-  status?: CalendarDayStatus;
-  price?: number;
+  available?: boolean;
+  price?: { amount: number }; // Amount in base units (e.g. 15000 = $150.00)
   min_stay?: number;
-  check_in_allowed?: boolean;
-  check_out_allowed?: boolean;
+  closed_for_checkin?: boolean;
+  closed_for_checkout?: boolean;
 }
 
 // ─── Conversation & Messaging ─────────────────────────────────────────────────
@@ -368,6 +470,16 @@ export interface Conversation {
   guest?: Guest;
 }
 
+/** Sender profile embedded in each Message (may be host or guest) */
+export interface Sender {
+  first_name: string;
+  full_name: string;
+  locale: string | null;
+  picture_url: string | null;
+  thumbnail_url: string | null;
+  location: string | null;
+}
+
 export interface MessageAttachment {
   type: "image" | string;
   url: string;
@@ -375,40 +487,55 @@ export interface MessageAttachment {
 
 export interface Message {
   id: string;
+  platform: string;
+  platform_id: string | number | null;
+  conversation_id: string;
+  reservation_id: string | null;
   body: string;
   content_type: "text" | "html" | string;
   sender_type: "host" | "guest" | "system";
+  sender_role: string; // e.g. "owner", "guest"
+  source: MessageSource; // How the message was sent
+  sender: Sender;
   attachments: MessageAttachment[];
+  sent_reference_id: string | null; // Idempotency reference
+  integration: string | null;
   created_at: string;
 }
 
 // ─── Reviews ──────────────────────────────────────────────────────────────────
 
-export interface ReviewRatings {
-  overall: number; // 1–5
-  cleanliness?: number;
-  communication?: number;
-  check_in?: number;
-  accuracy?: number;
-  location?: number;
-  value?: number;
+export interface DetailedRating {
+  type:
+    | "cleanliness"
+    | "communication"
+    | "location"
+    | "checkin"
+    | "accuracy"
+    | "value";
+  rating: number; // 1–5
+  comment: string;
 }
 
 export interface ReviewPublic {
+  rating: number; // 1–5
   review: string | null;
   response: string | null; // host's public reply
 }
 
 export interface ReviewPrivate {
   feedback: string | null;
-  ratings: ReviewRatings;
+  detailed_ratings: DetailedRating[] | null;
 }
 
 export interface Review {
   id: string;
+  platform: Platform;
   public: ReviewPublic;
   private: ReviewPrivate;
-  created_at: string;
+  can_respond: boolean;
+  responded_at: string | null; // ISO 8601
+  reviewed_at: string | null; // ISO 8601
   // Included relations
   reservation?: Reservation;
   guest?: Guest;
